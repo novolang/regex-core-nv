@@ -1,0 +1,544 @@
+// rxmatch.nv — the load-bearing interface: a match is a POSITION, and
+// captures are positions too.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// `RxMatch` IS THE PACKAGE, AND IT IS A SPAN AND NOT A STRING.  That is
+// the whole reason this row exists.  `std.regex.find` answers `?Str` —
+// the matched text, copied — and `jpregex` answers a `Bool`; between
+// them a caller can learn THAT something matched and WHAT it was, and
+// never WHERE.  Six of jq's builtins need where: `match` reports the
+// offset and length of every match, `capture` names the groups, `scan`
+// walks them, `splits` cuts between them, and `sub`/`gsub` rebuild the
+// subject around them.  None of those can be written over a copied
+// substring, because a copy has lost its position in the subject it
+// came from.
+//
+// SO EVERY ANSWER HERE IS OFFSETS, and the text is one slice away.
+// `RxMatch` is `start` and `end` in bytes; `RxCaptures` is a flat list
+// of them, two per group; and `text_of` is the slice a caller takes
+// when it wants the characters.  The cost of the other arrangement is
+// not theoretical: a `find_all` over a megabyte of log that answered
+// strings allocates one per match, and a `gsub` that worked from copies
+// cannot put them back.
+//
+// THE TEMPLATE WRITES INTO THE CALLER'S BUFFER.  `replace_into` takes
+// the `[u8]` a caller already has and appends, which is the shape a
+// `core` package uses for anything that produces more output than
+// input: a `gsub` over a million documents into one buffer is one
+// allocation, and the `Str`-returning convenience is written over it.
+//
+// `$1` AND `${name}` ARE ONE SYNTAX AND `$$` IS THE ESCAPE.  Both
+// spellings resolve to the same group, because a named group is
+// numbered as well; a `$` followed by anything else is a literal `$`,
+// which is the lenient reading every deployed engine has and the one
+// that keeps a price of `$5.00` from becoming a capture reference.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+use rxclass
+use rxerr
+use rxprog
+
+// Where a match is, in bytes, half-open.
+//
+// Half-open because that is what a slice takes and what makes an empty
+// match at position 3 (`start == end == 3`) representable — and an
+// empty match is not a curiosity, it is what `a*` finds between every
+// character.
+pub struct RxMatch
+    start: Int
+    end: Int
+
+// The whole match and every group, as offsets.
+//
+// A FLAT list of `2 * (group_count + 1)` integers: slot `2n` is group
+// `n`'s start and `2n+1` its end, and a group that did not participate
+// is `-1` in both.  Flat rather than a list of `RxMatch`, because that
+// is the shape the Pike VM carries per thread and converting at the
+// boundary would allocate a structure per thread per step.
+// `group_span` is the accessor that hides the arithmetic.
+//
+// -1 for a group that did not participate, and NOT an empty span: `(a)|b`
+// against `"b"` leaves group 1 absent, which is a different fact from
+// group 1 matching the empty string, and jq's `capture` reports them
+// differently.
+pub struct RxCaptures
+    slots: [Int]
+    group_count: Int
+
+// A compiled pattern, ready to match.
+//
+// The program plus the subject-independent facts a matcher consults on
+// every call — the engine choice, the literal prefix, whether it is
+// anchored — so that a `find_all` over a million subjects computes them
+// once.
+pub struct RxRegex
+    prog: RxProgram
+    limits: RxLimits
+
+// Compile a pattern into a matcher.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.regex(udata.data_compact(), "[0-9]{4}",
+//                         rxclass.default_flags(), rxerr.default_limits())
+//         Ok(r)  => println("${rxmatch.group_count(r)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn regex(d: UniData, pattern: Str, flags: RxFlags,
+             limits: RxLimits) -> Result<RxRegex, RxError> []
+    todo("regex-core-nv.rxmatch.regex")
+
+// Compile a pattern with the default flags and limits.
+//
+// The one-argument form, for the caller that has a pattern and no
+// opinions.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]{4}")
+//         Ok(r)  => println("${rxmatch.group_count(r)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn compile(d: UniData, pattern: Str) -> Result<RxRegex, RxError> []
+    todo("regex-core-nv.rxmatch.compile")
+
+// Does this pattern match anywhere in the subject?
+//
+// The cheapest question, and the one that runs the lazy DFA and never
+// the Pike VM.  A caller that only wants a verdict should ask this
+// rather than `find` and discard the answer.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${rxmatch.is_match(r, "abc123")}")
+// ```
+pub fn is_match(r: RxRegex, subject: Str) -> Bool []
+    todo("regex-core-nv.rxmatch.is_match")
+
+// Does this pattern match the WHOLE subject?
+//
+// Not `^…$` wrapped around the pattern, which is what a caller writes
+// and which is wrong under the `m` flag and wrong around an
+// alternation.  Anchoring is a property of the CALL here, which is the
+// same separation RE2 makes.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${rxmatch.is_full_match(r, "123")}")
+// ```
+pub fn is_full_match(r: RxRegex, subject: Str) -> Bool []
+    todo("regex-core-nv.rxmatch.is_full_match")
+
+// The first match, as a span, or `None`.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.find(r, "abc123")
+//                 Some(m) => println("${m.start} ${m.end}")
+//                 None    => println("no match")
+// ```
+pub fn find(r: RxRegex, subject: Str) -> ?RxMatch []
+    todo("regex-core-nv.rxmatch.find")
+
+// The first match at or after `from`, as a span, or `None`.
+//
+// The building block of every iteration over matches, and the reason
+// this package can answer `scan` and `gsub`: a caller walks the subject
+// by handing back the previous match's `end`.  `\b` and `^` are still
+// evaluated against the WHOLE subject and not against the tail, which
+// is what a caller slicing the subject and re-matching gets wrong.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.find_at(r, "a1b2", 2)
+//                 Some(m) => println("${m.start}")
+//                 None    => println("no match")
+// ```
+pub fn find_at(r: RxRegex, subject: Str, from: Int) -> ?RxMatch []
+    todo("regex-core-nv.rxmatch.find_at")
+
+// Every non-overlapping match, in order.
+//
+// An EMPTY match advances by one character rather than looping, which
+// is the rule every engine has and none states: `a*` against `"bb"`
+// matches at 0, 1 and 2, and an implementation that advanced by the
+// match length would not terminate.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${list.len(rxmatch.find_all(r, "a1b22c"))}")
+// ```
+pub fn find_all(r: RxRegex, subject: Str) -> [RxMatch] []
+    todo("regex-core-nv.rxmatch.find_all")
+
+// At most `limit` non-overlapping matches.
+//
+// The bound a caller needs when the subject came from outside: a
+// `find_all` over a hostile subject with a pattern that matches
+// everywhere answers a list the length of the subject.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${list.len(rxmatch.find_first_n(r, "123456", 3))}")
+// ```
+pub fn find_first_n(r: RxRegex, subject: Str, limit: Int) -> [RxMatch] []
+    todo("regex-core-nv.rxmatch.find_first_n")
+
+// The first match with its capture groups, or `None`.
+//
+// The call that runs the Pike VM: the DFA carries no slots, so asking
+// for groups is what turns it off, and `rxprog.engine_for` says so
+// before the call rather than after the profile.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "(?<y>[0-9]{4})-([0-9]{2})")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.captures(r, "2026-09")
+//                 Some(c) => println("${c.group_count}")
+//                 None    => println("no match")
+// ```
+pub fn captures(r: RxRegex, subject: Str) -> ?RxCaptures []
+    todo("regex-core-nv.rxmatch.captures")
+
+// The first match with its groups, at or after `from`.
+//
+// What `scan` walks with, and what `gsub` rebuilds a subject from.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "([0-9])")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.captures_at(r, "a1b2", 2)
+//                 Some(c) => println("${c.group_count}")
+//                 None    => println("no match")
+// ```
+pub fn captures_at(r: RxRegex, subject: Str, from: Int) -> ?RxCaptures []
+    todo("regex-core-nv.rxmatch.captures_at")
+
+// Every non-overlapping match with its groups, in order.
+//
+// The one-shot `std.regex` explicitly does not have — its own page says
+// "there is no groups-of-every-match one-shot, so loop `regex.group`
+// over the spans" — and the one jq's `scan` and `gsub` are written in
+// terms of.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "([a-z])([0-9])")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${list.len(rxmatch.captures_all(r, "a1b2"))}")
+// ```
+pub fn captures_all(r: RxRegex, subject: Str) -> [RxCaptures] []
+    todo("regex-core-nv.rxmatch.captures_all")
+
+// One group's span, or `None` when it did not participate.
+//
+// Group 0 is the whole match.  `None` and not an empty span, because
+// `(a)|b` against `"b"` leaves group 1 ABSENT and that is a different
+// fact from group 1 matching the empty string — jq's `capture` reports
+// `null` for one and `""` for the other.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "(a)|b")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.captures(r, "b")
+//                 None => println("no match")
+//                 Some(c) =>
+//                     match rxmatch.group_span(c, 1)
+//                         Some(_) => println("group 1 took part")
+//                         None    => println("group 1 did not")
+// ```
+pub fn group_span(c: RxCaptures, n: Int) -> ?RxMatch []
+    todo("regex-core-nv.rxmatch.group_span")
+
+// One named group's span, or `None`.
+//
+// Takes the matcher as well as the captures, because the names live on
+// the program and a `RxCaptures` that carried them would carry a copy
+// of the name list per match.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "(?<y>[0-9]{4})")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.captures(r, "2026")
+//                 None => println("no match")
+//                 Some(c) =>
+//                     match rxmatch.group_named(r, c, "y")
+//                         Some(m) => println("${m.start}")
+//                         None    => println("absent")
+// ```
+pub fn group_named(r: RxRegex, c: RxCaptures, name: Str) -> ?RxMatch []
+    todo("regex-core-nv.rxmatch.group_named")
+
+// The text a span covers.
+//
+// The slice, taken once, where the caller wants characters rather than
+// positions.  Published here rather than left to `str` so that a span
+// this package produced and a slice a caller takes cannot disagree
+// about byte versus character indexing.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.find(r, "abc123")
+//                 None    => println("no match")
+//                 Some(m) => println(rxmatch.text_of("abc123", m))
+// ```
+pub fn text_of(subject: Str, m: RxMatch) -> Str []
+    todo("regex-core-nv.rxmatch.text_of")
+
+// The subject cut at every match, as spans.
+//
+// SPANS and not strings, so a caller splitting a megabyte allocates
+// nothing until it takes the pieces it wants.  The text after the last
+// match is always a field, so a subject ending in a separator yields a
+// trailing empty span — the same rule `std.regex.split` states, kept so
+// a migration does not change field counts.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), ",")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${list.len(rxmatch.split(r, "a,b,c"))}")
+// ```
+pub fn split(r: RxRegex, subject: Str) -> [RxMatch] []
+    todo("regex-core-nv.rxmatch.split")
+
+// The same, stopping after `limit` fields, with the rest of the subject
+// as the last one.
+//
+// jq's `splits` takes no limit and every other split in the world does;
+// it is here because a caller parsing `key=value=with=equals` wants
+// two fields and not four.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "=")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${list.len(rxmatch.split_n(r, "a=b=c", 2))}")
+// ```
+pub fn split_n(r: RxRegex, subject: Str, limit: Int) -> [RxMatch] []
+    todo("regex-core-nv.rxmatch.split_n")
+
+// The subject with every match replaced by the expanded template,
+// appended to a buffer the caller owns.
+//
+// The form everything else is written over: a `gsub` over a million
+// documents into one buffer is one allocation.  `replace_all` is the
+// convenience.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "([0-9])")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.replace_into([], r, "a1", "<$1>")
+//                 Ok(out) => println("${list.len(out)}")
+//                 Err(er) => println(er.message())
+// ```
+pub fn replace_into(out: [u8], r: RxRegex, subject: Str, template: Str) -> Result<[u8], RxError> []
+    todo("regex-core-nv.rxmatch.replace_into")
+
+// The subject with every match replaced, as text.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "([0-9])")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.replace_all(r, "a1b2", "<$1>")
+//                 Ok(s)   => println(s)
+//                 Err(er) => println(er.message())
+// ```
+pub fn replace_all(r: RxRegex, subject: Str, template: Str) -> Result<Str, RxError> []
+    todo("regex-core-nv.rxmatch.replace_all")
+
+// The subject with the FIRST match replaced, as text.
+//
+// jq's `sub` to `gsub`'s `replace_all`, and a separate function rather
+// than a count argument because the two are different operations at
+// every call site that uses either.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "([0-9])")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.replace_first(r, "a1b2", "<$1>")
+//                 Ok(s)   => println(s)
+//                 Err(er) => println(er.message())
+// ```
+pub fn replace_first(r: RxRegex, subject: Str, template: Str) -> Result<Str, RxError> []
+    todo("regex-core-nv.rxmatch.replace_first")
+
+// One template expanded against one set of captures, appended to a
+// caller's buffer.
+//
+// Published separately because a caller that is replacing by a RULE
+// rather than by one template — jq's `sub` with a filter on the right
+// — expands a different template per match and cannot use
+// `replace_all`.
+//
+// ```novo
+// use std.list
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "([0-9])")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.captures(r, "a1")
+//                 None => println("no match")
+//                 Some(c) =>
+//                     match rxmatch.expand_into([], r, c, "a1", "<$1>")
+//                         Ok(out) => println("${list.len(out)}")
+//                         Err(er) => println(er.message())
+// ```
+pub fn expand_into(out: [u8], r: RxRegex, c: RxCaptures, subject: Str,
+                   template: Str) -> Result<[u8], RxError> []
+    todo("regex-core-nv.rxmatch.expand_into")
+
+// Does this template name a group the pattern does not have?
+//
+// `None` when it is fine, and the reference that is wrong otherwise.
+// Asked ONCE at setup rather than per match, because a `gsub` over a
+// million documents should not discover on the last one that `${yer}`
+// was a typo — and because a replace that silently wrote an empty
+// string for an unknown name is how a field disappears from a data set.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "(?<y>[0-9]+)")
+//         Err(e) => println(e.message())
+//         Ok(r) =>
+//             match rxmatch.template_fault(r, "\${yer}")
+//                 Some(bad) => println(bad)
+//                 None      => println("the template is fine")
+// ```
+pub fn template_fault(r: RxRegex, template: Str) -> ?Str []
+    todo("regex-core-nv.rxmatch.template_fault")
+
+// How many capturing groups this matcher has.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "(a)(b)")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${rxmatch.group_count(r)}")
+// ```
+pub fn group_count(r: RxRegex) -> Int []
+    todo("regex-core-nv.rxmatch.group_count")
+
+// The pattern this matcher was compiled from.
+//
+// Kept so a caller reporting a slow or refused match can name it
+// without holding the string alongside the matcher.
+//
+// ```novo
+// use rxmatch
+// use udata
+//
+// fn main() [io]
+//     match rxmatch.compile(udata.data_compact(), "[0-9]+")
+//         Err(e) => println(e.message())
+//         Ok(r)  => println(rxmatch.pattern_of(r))
+// ```
+pub fn pattern_of(r: RxRegex) -> Str []
+    todo("regex-core-nv.rxmatch.pattern_of")

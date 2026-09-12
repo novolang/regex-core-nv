@@ -1,0 +1,446 @@
+// rxclass.nv — a character class is a sorted list of codepoint ranges,
+// and everything else about classes is arithmetic on that list.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A CLASS IS RANGES AND NOT A PREDICATE, and that is the decision this
+// module exists to make.  A predicate — a function from a codepoint to
+// a `Bool` — cannot be negated cheaply, cannot be unioned with another
+// at compile time, cannot be case-folded, and cannot be turned into the
+// byte ranges a lazy DFA needs.  A sorted, disjoint list of inclusive
+// ranges does all four with a merge, and it is what RE2 and the `regex`
+// crate both hold.  The normal form is ENFORCED by the constructors:
+// every function here answers a class whose ranges are sorted, disjoint
+// and non-adjacent, because a `negate` over an unnormalised list is
+// wrong in a way no test of `matches` will find.
+//
+// UNICODE IS A MODE AND THE DEVICE TIER IS THE REASON.  `\w`, `\d`,
+// `\s` and `.` each have two meanings: the ASCII one everybody learned
+// and the Unicode one everybody expects.  The `regex` crate resolves it
+// with a build feature; here it is `RxUnicodeMode` on the flags, so ONE
+// build answers both and a caller who cannot afford unicode-nv's tables
+// asks for `RxAscii` at compile time rather than linking a different
+// package.  The tables only load when the mode asks for them, which is
+// why `UniData` is a parameter and not a global.
+//
+// CASE-INSENSITIVITY IS DONE AT COMPILE TIME, NOT AT MATCH TIME.  A
+// matcher that lowercased each subject byte as it went would be wrong
+// for every character whose fold is not a single codepoint, and would
+// pay for the fold on every byte of every subject.  `fold_case` expands
+// the CLASS once, when the pattern is compiled, which is both correct
+// and free at match time — and it is why `RxFlags` is an argument to
+// the class builders rather than to `matches`.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+// One inclusive range of codepoints.
+//
+// Inclusive at both ends, which is what every regular-expression
+// syntax writes (`a-z` includes `z`) and what avoids an off-by-one at
+// the one place the two conventions meet.
+pub struct RxRange
+    lo: Int
+    hi: Int
+
+// A set of codepoints, as sorted disjoint ranges.
+//
+// `negated` is NOT a field, and its absence is deliberate: a class that
+// remembered it was written `[^…]` would have two representations for
+// one set, and every operation would have to handle four combinations
+// of the flag.  `negate` produces the complement directly, so a class
+// is always exactly the set it matches.
+pub struct RxClass
+    ranges: [RxRange]
+
+// Which alphabet `\w`, `\d`, `\s` and `.` are over.
+pub enum RxUnicodeMode
+    // `\w` is `[0-9A-Za-z_]`, `\d` is `[0-9]`, `.` is any byte but a
+    // newline.  What `std.regex` does, what a device tier can afford,
+    // and what a caller matching protocol tokens wants.
+    RxAscii
+    // `\w` is any Unicode letter, mark, digit, connector punctuation or
+    // underscore; `\d` is any `Nd`; `.` is any scalar but a newline.
+    // What a caller matching human text wants, and what costs
+    // unicode-nv's tables.
+    RxUnicode
+
+// The flags a pattern is compiled under.
+//
+// A value rather than inline `(?i)` only, because every one of these
+// arrives from two places — the caller's own default and the pattern's
+// own `(?i)` — and a struct is what the two are combined into.  Inline
+// flags are still parsed; `rxast` applies them to the subtree they
+// govern.
+pub struct RxFlags
+    // `i` — case-insensitive, expanded into the classes at compile
+    // time.
+    case_insensitive: Bool
+    // `m` — `^` and `$` match at every line boundary rather than only
+    // at the ends of the subject.  THE ONE FLAG `std.regex` HAS NO
+    // FORM OF, which is why a caller matching a file line by line
+    // reaches for this package.
+    multi_line: Bool
+    // `s` — `.` matches a newline too.
+    dot_matches_newline: Bool
+    // `U` — swap the greediness of every repetition.  RE2 and the
+    // `regex` crate both have it; it is here for pattern
+    // compatibility and it is not a thing anybody should write.
+    swap_greed: Bool
+    // `x` — ignore whitespace and `#` comments in the pattern.  What
+    // makes a forty-character pattern reviewable.
+    ignore_whitespace: Bool
+    // Which alphabet the shorthand classes are over.
+    unicode: RxUnicodeMode
+
+// Case-sensitive, single-line, `.` excluding a newline, greedy, no
+// whitespace mode, Unicode on.
+//
+// Unicode ON by default, which is the `regex` crate's choice and the
+// opposite of `std.regex`'s: a caller matching human text who forgot to
+// ask for it gets the right answer, and a caller matching protocol
+// tokens who forgot has paid for tables they did not need.  The first
+// mistake is a wrong answer and the second is a slower one.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.default_flags().case_insensitive}")
+// ```
+pub fn default_flags() -> RxFlags []
+    todo("regex-core-nv.rxclass.default_flags")
+
+// The same flags with Unicode off — `\w` is `[0-9A-Za-z_]` and no
+// table is consulted.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     match rxclass.ascii_flags().unicode
+//         RxAscii   => println("ascii")
+//         RxUnicode => println("unicode")
+// ```
+pub fn ascii_flags() -> RxFlags []
+    todo("regex-core-nv.rxclass.ascii_flags")
+
+// The flags a one-letter inline group sets, or the fault that letter
+// is.
+//
+// `i`, `m`, `s`, `U` and `x`; anything else is `RxUnknownFlag` with
+// the letter, rather than being ignored — an ignored `(?p)` is a
+// pattern that silently means something other than what its author
+// wrote.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     match rxclass.flag_set(rxclass.default_flags(), "i", true, 2)
+//         Ok(f)  => println("${f.case_insensitive}")
+//         Err(e) => println(e.message())
+// ```
+pub fn flag_set(f: RxFlags, letter: Str, on: Bool, at: Int) -> Result<RxFlags, RxError> []
+    todo("regex-core-nv.rxclass.flag_set")
+
+// An empty class, matching nothing.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.is_empty(rxclass.empty())}")
+// ```
+pub fn empty() -> RxClass []
+    todo("regex-core-nv.rxclass.empty")
+
+// A class holding exactly one codepoint.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.one(65), 65)}")
+// ```
+pub fn one(ch: Int) -> RxClass []
+    todo("regex-core-nv.rxclass.one")
+
+// A class holding one inclusive range, or the fault it is when the end
+// is below the start.
+//
+// `[z-a]` is refused rather than normalised, because the two readings
+// — an empty class and a reversed one — differ silently and neither is
+// what the author meant.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     match rxclass.range(97, 122, 0)
+//         Ok(c)  => println("${rxclass.matches(c, 100)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn range(lo: Int, hi: Int, at: Int) -> Result<RxClass, RxError> []
+    todo("regex-core-nv.rxclass.range")
+
+// The union of two classes, normalised.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     let c = rxclass.union(rxclass.one(65), rxclass.one(66))
+//     println("${rxclass.matches(c, 66)}")
+// ```
+pub fn union(a: RxClass, b: RxClass) -> RxClass []
+    todo("regex-core-nv.rxclass.union")
+
+// The intersection of two classes.
+//
+// What `[\w&&[^\d]]` compiles to, and what a profile check uses to ask
+// whether a class stays inside a subset.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     let c = rxclass.intersect(rxclass.one(65), rxclass.one(66))
+//     println("${rxclass.is_empty(c)}")
+// ```
+pub fn intersect(a: RxClass, b: RxClass) -> RxClass []
+    todo("regex-core-nv.rxclass.intersect")
+
+// Everything in `a` that is not in `b`.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.is_empty(rxclass.difference(rxclass.one(65), rxclass.one(65)))}")
+// ```
+pub fn difference(a: RxClass, b: RxClass) -> RxClass []
+    todo("regex-core-nv.rxclass.difference")
+
+// The complement of a class over the whole scalar range, with the
+// surrogate range excluded.
+//
+// The surrogates are excluded because they are not scalar values: a
+// class that matched one could never match, since no well-formed
+// subject contains one, and a negated class that included them would
+// disagree with every other engine about the SIZE of `[^a]` — which
+// matters, because that size is what a lazy DFA's transition table is
+// built over.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.negate(rxclass.one(65)), 66)}")
+// ```
+pub fn negate(c: RxClass) -> RxClass []
+    todo("regex-core-nv.rxclass.negate")
+
+// The class, closed under simple case folding.
+//
+// Done at COMPILE time and never at match time, which is both the
+// correct answer and the free one: `K` and `k` and `K` (Kelvin sign)
+// are one fold group, and a matcher that lowercased the subject byte by
+// byte would get that wrong and would pay for it on every byte.
+//
+// `d` is unicode-nv's table, and it is a parameter rather than a global
+// because a caller in `RxAscii` mode never loads it.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     let c = rxclass.fold_case(udata.data_compact(), rxclass.one(75))
+//     println("${rxclass.matches(c, 107)}")
+// ```
+pub fn fold_case(d: UniData, c: RxClass) -> RxClass []
+    todo("regex-core-nv.rxclass.fold_case")
+
+// The same, for a caller in `RxAscii` mode: `A`-`Z` folds to `a`-`z`
+// and nothing else does.
+//
+// A separate function rather than a flag, because it takes no `UniData`
+// — and that is the whole point of the ASCII mode.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.fold_case_ascii(rxclass.one(75)), 107)}")
+// ```
+pub fn fold_case_ascii(c: RxClass) -> RxClass []
+    todo("regex-core-nv.rxclass.fold_case_ascii")
+
+// Is this codepoint in the class?
+//
+// A linear scan is wrong here and a binary search is right, because a
+// negated Unicode class has hundreds of ranges and this is called once
+// per codepoint per active thread.  Published as one function so the
+// Pike VM and the DFA builder cannot disagree about membership.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.one(65), 65)}")
+// ```
+pub fn matches(c: RxClass, ch: Int) -> Bool []
+    todo("regex-core-nv.rxclass.matches")
+
+// Does this class hold nothing at all?
+//
+// An empty class is legal — `[^\x00-\x{10FFFF}]` is one — and it makes
+// the whole pattern match nothing, which the compiler uses to prune.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.is_empty(rxclass.empty())}")
+// ```
+pub fn is_empty(c: RxClass) -> Bool []
+    todo("regex-core-nv.rxclass.is_empty")
+
+// How many codepoints the class holds.
+//
+// What the compiler compares against the alphabet size to decide
+// whether a class is worth a range check or a bitmap, and what a
+// profile check uses to refuse a class that is "almost everything".
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.cardinality(rxclass.one(65))}")
+// ```
+pub fn cardinality(c: RxClass) -> Int []
+    todo("regex-core-nv.rxclass.cardinality")
+
+// `\w` in this mode — `[0-9A-Za-z_]` in ASCII, and letters, marks,
+// digits, connector punctuation and underscore in Unicode.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.word(udata.data_compact(), RxAscii), 95)}")
+// ```
+pub fn word(d: UniData, m: RxUnicodeMode) -> RxClass []
+    todo("regex-core-nv.rxclass.word")
+
+// `\d` in this mode — `[0-9]` in ASCII, general category `Nd` in
+// Unicode.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.digit(udata.data_compact(), RxAscii), 53)}")
+// ```
+pub fn digit(d: UniData, m: RxUnicodeMode) -> RxClass []
+    todo("regex-core-nv.rxclass.digit")
+
+// `\s` in this mode — `[\t\n\v\f\r ]` in ASCII, `White_Space` in
+// Unicode.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     println("${rxclass.matches(rxclass.space(udata.data_compact(), RxAscii), 32)}")
+// ```
+pub fn space(d: UniData, m: RxUnicodeMode) -> RxClass []
+    todo("regex-core-nv.rxclass.space")
+
+// What `.` matches under these flags: every scalar, less the newline
+// unless `s` is set, and less the surrogates.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     let c = rxclass.dot(udata.data_compact(), rxclass.default_flags())
+//     println("${rxclass.matches(c, 10)}")
+// ```
+pub fn dot(d: UniData, f: RxFlags) -> RxClass []
+    todo("regex-core-nv.rxclass.dot")
+
+// A POSIX class by name — `alpha`, `digit`, `space`, `alnum`, `upper`,
+// `lower`, `punct`, `print`, `graph`, `cntrl`, `blank`, `xdigit`, `word`,
+// `ascii` — or the fault an unknown name is.
+//
+// Refused rather than treated as a literal, which is RE2's behaviour
+// and the opposite of a leniency that turns `[[:alhpa:]]` into a class
+// of eight letters and a colon.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     match rxclass.posix_class(udata.data_compact(), "xdigit", RxAscii, 2)
+//         Ok(c)  => println("${rxclass.matches(c, 70)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn posix_class(d: UniData, name: Str, m: RxUnicodeMode, at: Int) -> Result<RxClass, RxError> []
+    todo("regex-core-nv.rxclass.posix_class")
+
+// A Unicode general category or script by name — `\p{L}`, `\p{Nd}`,
+// `\p{Greek}` — or the fault an unknown name is.
+//
+// Over unicode-nv's own `UniCategory`, so the categories this package
+// answers and the categories that package answers are the same set by
+// construction rather than by a table somebody keeps in step.
+//
+// ```novo
+// use rxclass
+// use udata
+//
+// fn main() [io]
+//     match rxclass.property(udata.data_compact(), "Nd", 3)
+//         Ok(c)  => println("${rxclass.matches(c, 53)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn property(d: UniData, name: Str, at: Int) -> Result<RxClass, RxError> []
+    todo("regex-core-nv.rxclass.property")
+
+// Every property and script name this package answers, sorted.
+//
+// Published as data because a consumer building an editor's completion,
+// or reporting `RxUnknownProperty` with a suggestion, needs the same
+// list the parser has — and a second copy would drift.
+//
+// ```novo
+// use std.list
+// use rxclass
+//
+// fn main() [io]
+//     println("${list.len(rxclass.property_names())}")
+// ```
+pub fn property_names() -> [Str] []
+    todo("regex-core-nv.rxclass.property_names")
+
+// Does matching this class need unicode-nv's tables?
+//
+// The question a caller in a memory-bounded build asks before it
+// compiles a pattern: a class over `[a-z]` does not, and `\p{Greek}`
+// does.  Answering it before the compile is what lets such a caller
+// refuse a pattern rather than discover the cost at match time.
+//
+// ```novo
+// use rxclass
+//
+// fn main() [io]
+//     println("${rxclass.needs_tables(rxclass.one(65))}")
+// ```
+pub fn needs_tables(c: RxClass) -> Bool []
+    todo("regex-core-nv.rxclass.needs_tables")

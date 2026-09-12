@@ -1,0 +1,244 @@
+// rxprofile.nv — the named subsets, so a consumer bound to one of them
+// can delegate here instead of writing a second engine.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A PROFILE IS A REFUSAL WITH A NAME ON IT.  Three packages on this
+// grid are each bound to a different dialect for a different reason,
+// and each of them today either ships its own matcher or refuses a
+// feature.  A profile is the shape that lets all three use one engine:
+// the pattern is parsed once, checked against the subset, and either
+// compiled or refused with the construct named in the specification's
+// own words.
+//
+// I-REGEXP IS THE ONE THAT MATTERS.  RFC 9485 defines the subset of
+// XML Schema regular expressions that every implementation agrees
+// about: no anchors, no back-references, no lookaround, no lazy
+// quantifiers, and no capture semantics at all.  jsonpath-nv's
+// `jpregex` implements it and answers a `Bool`, which is correct and
+// complete for what RFC 9535 needs.  What it cannot do is answer a
+// position — and once this package exists, `jpregex` becomes a
+// profile check plus a `rxmatch.is_match`, with the SAME refusals and
+// the same names, rather than a second parser.
+//
+// A PROFILE DOES NOT CHANGE WHAT A PATTERN MEANS.  That is the rule
+// this module is built on: a pattern that both `RxFull` and `RxIRegexp`
+// accept matches the same strings under both.  A profile only decides
+// what is REFUSED.  The alternative — a profile that also changed
+// semantics, so `.` meant one thing here and another there — is exactly
+// the interoperability failure RFC 9485 exists to prevent, and it would
+// be reintroduced by the package meant to fix it.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+use rxast
+use rxclass
+use rxerr
+
+// Which dialect a pattern is checked against.
+pub enum RxProfile
+    // Everything this package implements: RE2 semantics, named groups,
+    // the five flags, Unicode classes.  What a jq program and a search
+    // box get.
+    RxFull
+    // RFC 9485's I-Regexp.  No anchors — the whole subject is always
+    // matched — no back-references, no lookaround, no lazy
+    // quantifiers, no named groups and no flags.  What jsonpath-nv's
+    // `match()` and `search()` are defined over, and the profile in
+    // which two conforming implementations cannot disagree.
+    RxIRegexp
+    // `RxFull` with every class restricted to ASCII and no `\p{…}`.
+    // The profile a caller asks for when it must not link unicode-nv's
+    // tables, and the one a protocol tokeniser wants anyway.
+    RxAsciiOnly
+    // The dialect `std.regex` accepts: PCRE-flavoured, byte-wise, no
+    // named groups, no inline flags, no multiline.  Here so that a
+    // program migrating FROM the standard library can check a pattern
+    // before it moves, and be told which constructs it is about to
+    // gain rather than discovering the difference in production.
+    RxStdCompatible
+
+// The profile's own name — `"I-Regexp"`, `"full"`, `"ascii-only"`,
+// `"std.regex-compatible"`.
+//
+// The specification's spelling where there is one, because the name in
+// a refusal has to be searchable against the document a reader has
+// open.
+//
+// ```novo
+// use rxprofile
+//
+// fn main() [io]
+//     println(rxprofile.profile_name(RxIRegexp))
+// ```
+pub fn profile_name(p: RxProfile) -> Str []
+    todo("regex-core-nv.rxprofile.profile_name")
+
+// The flags a profile fixes, which a caller may not override.
+//
+// `RxIRegexp` fixes all five: no `i`, no `m`, no `s`, no `U`, no `x`,
+// because RFC 9485 has no flag syntax and a caller that set one outside
+// the pattern would be matching a different language from a conforming
+// peer.  `RxAsciiOnly` fixes only the Unicode mode.
+//
+// ```novo
+// use rxprofile
+//
+// fn main() [io]
+//     println("${rxprofile.profile_flags(RxIRegexp).case_insensitive}")
+// ```
+pub fn profile_flags(p: RxProfile) -> RxFlags []
+    todo("regex-core-nv.rxprofile.profile_flags")
+
+// The first construct in this tree that the profile does not allow, or
+// `None`.
+//
+// A NAME rather than a `Bool`, because "this pattern is not I-Regexp"
+// sends the writer looking for a typo and "I-Regexp has no anchors, and
+// there is a `^` at byte 0" tells them what to change.  The words are
+// the specification's — `"anchor"`, `"back-reference"`, `"lookaround"`,
+// `"lazy quantifier"`, `"named group"`, `"inline flag"`.
+//
+// ```novo
+// use rxast
+// use rxclass
+// use rxerr
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     match rxast.parse(udata.data_compact(), "^a", rxclass.default_flags(),
+//                       rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(a) =>
+//             match rxprofile.outside(RxIRegexp, a)
+//                 Some(what) => println(what)
+//                 None       => println("inside the profile")
+// ```
+pub fn outside(p: RxProfile, a: RxAst) -> ?Str []
+    todo("regex-core-nv.rxprofile.outside")
+
+// Every construct in this tree the profile does not allow, in the order
+// they appear.
+//
+// The whole list rather than the first, for the caller reporting on a
+// pattern it did not write: a jq program moved from `jq` itself may use
+// three refused constructs and a message that names one sends its
+// author round the loop three times.
+//
+// ```novo
+// use std.list
+// use rxast
+// use rxclass
+// use rxerr
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     match rxast.parse(udata.data_compact(), "^a", rxclass.default_flags(),
+//                       rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(a)  => println("${list.len(rxprofile.outside_all(RxIRegexp, a))}")
+// ```
+pub fn outside_all(p: RxProfile, a: RxAst) -> [Str] []
+    todo("regex-core-nv.rxprofile.outside_all")
+
+// Is this pattern inside the profile?
+//
+// The predicate `jpregex.is_iregexp` already publishes, answered here
+// from the same parse the compile would use — so a consumer that asks
+// and then compiles parses once.
+//
+// ```novo
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     println("${rxprofile.accepts(udata.data_compact(), RxIRegexp, "[0-9]+")}")
+// ```
+pub fn accepts(d: UniData, p: RxProfile, pattern: Str) -> Bool []
+    todo("regex-core-nv.rxprofile.accepts")
+
+// Compile a pattern under a profile, or the fault that it is outside
+// it.
+//
+// THE CALL A CONSUMER BOUND TO A SUBSET MAKES.  `RxOutsideProfile`
+// carries the construct and the profile's name, so the message a
+// consumer prints needs nothing added.
+//
+// ```novo
+// use rxerr
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     match rxprofile.compile_in(udata.data_compact(), RxIRegexp, "[0-9]+",
+//                                rxerr.default_limits())
+//         Ok(r)  => println("${rxprofile.needs_tables_in(r)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn compile_in(d: UniData, p: RxProfile, pattern: Str,
+                  limits: RxLimits) -> Result<RxRegex, RxError> []
+    todo("regex-core-nv.rxprofile.compile_in")
+
+// Does a matcher compiled under a profile consult unicode-nv's tables?
+//
+// Always false under `RxAsciiOnly`, and a fact about the pattern
+// otherwise.  What a caller in a memory-bounded build reads back to
+// confirm the profile did what it asked.
+//
+// ```novo
+// use rxerr
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     match rxprofile.compile_in(udata.data_compact(), RxAsciiOnly, "[0-9]+",
+//                                rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(r)  => println("${rxprofile.needs_tables_in(r)}")
+// ```
+pub fn needs_tables_in(r: RxRegex) -> Bool []
+    todo("regex-core-nv.rxprofile.needs_tables_in")
+
+// Does the `RxIRegexp` profile require Unicode category data for this
+// pattern?
+//
+// `jpregex.needs_categories` under another name, kept because
+// jsonpath-nv publishes it and a delegation that lost a function would
+// be a breaking change for its consumers.
+//
+// ```novo
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     println("${rxprofile.needs_categories(udata.data_compact(), "\\p{L}+")}")
+// ```
+pub fn needs_categories(d: UniData, pattern: Str) -> Bool []
+    todo("regex-core-nv.rxprofile.needs_categories")
+
+// What a pattern gains by moving from `std.regex` to this package.
+//
+// The constructs `RxFull` accepts that `RxStdCompatible` does not, for
+// this pattern — `"named group"`, `"multiline"`, `"\\p{…} property"` —
+// or the empty list when the pattern means the same in both.
+//
+// Published because the migration is the risk this package creates: a
+// program that moves a pattern here gets a matcher with more in it, and
+// the one difference that changes an ANSWER rather than adding a
+// feature is Unicode mode.  `\w` is `[0-9A-Za-z_]` in `std.regex` and
+// any Unicode letter here, so a pattern validating an identifier
+// silently starts accepting one written in Greek.  That is the first
+// entry this function reports, and the reason it exists.
+//
+// ```novo
+// use std.list
+// use rxprofile
+// use udata
+//
+// fn main() [io]
+//     println("${list.len(rxprofile.gained_from_std(udata.data_compact(), "\\w+"))}")
+// ```
+pub fn gained_from_std(d: UniData, pattern: Str) -> [Str] []
+    todo("regex-core-nv.rxprofile.gained_from_std")

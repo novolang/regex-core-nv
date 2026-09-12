@@ -1,0 +1,173 @@
+// rxerr.nv — a pattern that does not compile says so, at the byte it
+// went wrong, and never as "no match".
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A BAD PATTERN IS AN ERROR AND NOT AN EMPTY RESULT.  `std.regex` makes
+// the other choice on purpose — its value-returning surface is total,
+// so an unparsable pattern behaves as "no match" and the reason is one
+// call away — and that choice is right for a `Bool`-shaped API a script
+// calls with a literal.  It is wrong for this package, whose callers
+// hold patterns that came from a jq program, a JSON Schema document or
+// a user's search box, and whose answer is positions rather than a
+// verdict.  A `find` that answered `None` for "no match" and also for
+// "your pattern has an unclosed bracket" would make every consumer
+// re-ask `error()` on every call to tell them apart.
+//
+// EVERY VARIANT CARRIES A BYTE OFFSET, because a pattern has no other
+// landmark: it is one line, with no line numbers in it, and a consumer
+// that can underline the clause that was wrong reports something a
+// person can act on.  The offset is a byte index into the pattern text.
+//
+// THE REFUSALS ARE THE LINEAR-TIME GUARANTEE, SPELLED OUT.  A
+// back-reference and a lookaround are not missing features; they are
+// the two constructs that cannot be matched in time linear in the
+// subject, and a package that accepted them would be a package whose
+// worst case is exponential.  `RxBackreference` and `RxLookaround` say
+// so by name, so a reader who writes `(a)\1` is told what they traded
+// rather than told they made a typo.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+// Why a pattern did not compile.
+pub enum RxError
+    // A `(` with no `)`, or a `[` with no `]`.  `at` is the opening.
+    RxUnclosed(at: Int, what: Str)
+    // A `)` with no `(`.
+    RxUnexpectedClose(at: Int)
+    // A repetition with nothing before it: a leading `*`, or `a|*`.
+    RxNothingToRepeat(at: Int)
+    // `{2,1}` — a counted repetition whose minimum exceeds its maximum.
+    RxBadRepeatRange(at: Int, min: Int, max: Int)
+    // A counted repetition whose expansion would exceed the program
+    // limit.  `{1000}{1000}{1000}` is linear to match and quadratic to
+    // COMPILE, which is the denial of service a limit exists for.
+    RxRepeatTooLarge(at: Int, want: Int, limit: Int)
+    // `[z-a]` — a class range whose end is below its start.
+    RxBadClassRange(at: Int)
+    // An escape this dialect does not define, such as `\q`.  RE2
+    // refuses an unknown escape rather than treating it as the letter,
+    // because the two readings differ silently and the wrong one is a
+    // pattern that matches nothing.
+    RxBadEscape(at: Int, text: Str)
+    // `\p{Nosuch}` — a Unicode property or script nobody defines.
+    RxUnknownProperty(at: Int, name: Str)
+    // `[[:nosuch:]]` — a POSIX class nobody defines.
+    RxUnknownPosixClass(at: Int, name: Str)
+    // `(?<1bad>…)` — a group name that is not an identifier, or one
+    // used twice in the same pattern.
+    RxBadGroupName(at: Int, name: Str)
+    // `(?q)` — an inline flag letter this dialect does not define.
+    RxUnknownFlag(at: Int, letter: Str)
+    // `(a)\1` — a back-reference.  NOT a gap: matching one cannot be
+    // done in linear time, and the whole design rests on that bound.
+    RxBackreference(at: Int)
+    // `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` — lookaround, refused for
+    // the same reason and named separately because the two are
+    // different things a reader reaches for.
+    RxLookaround(at: Int)
+    // The compiled program exceeded the caller's instruction limit.
+    RxProgramTooLarge(insns: Int, limit: Int)
+    // The pattern's byte length exceeded the caller's limit.  Checked
+    // before parsing, so a megabyte of `(((((…` costs nothing.
+    RxPatternTooLong(len: Int, limit: Int)
+    // The pattern is outside the profile the caller asked for — an
+    // anchor under `RxIRegexp`, say.  `construct` names what was found,
+    // in the specification's own words, so the message can be handed
+    // to the person who wrote the pattern.
+    RxOutsideProfile(at: Int, construct: Str, profile: Str)
+
+// The standard `Error` implementation, so a pattern fault can be
+// reported by anything that reports errors.
+impl Error for RxError
+    // One line: what was wrong and at which byte of the pattern.
+    //
+    // The offset is in the message rather than left for the caller to
+    // add, because a pattern has no other landmark — it is one line
+    // with no line numbers in it.
+    fn message(self) -> Str
+        todo("regex-core-nv.rxerr.RxError.message")
+
+// The byte offset in the pattern this fault is about.
+//
+// Published so a consumer can underline the clause rather than
+// rejecting the whole line.  A fault about the whole pattern — a
+// program or a length limit — answers 0.
+//
+// ```novo
+// use rxerr
+//
+// fn main() [io]
+//     println("${rxerr.offset_of(RxUnexpectedClose(4))}")
+// ```
+pub fn offset_of(e: RxError) -> Int []
+    todo("regex-core-nv.rxerr.offset_of")
+
+// Is this fault the linear-time guarantee refusing something, rather
+// than a mistake in the pattern?
+//
+// True for a back-reference and for lookaround, and false for
+// everything else.  The two want a DIFFERENT message from a consumer:
+// a typo asks the writer to look again, and these ask them to write
+// the pattern another way, because no version of this package will
+// ever accept them.
+//
+// ```novo
+// use rxerr
+//
+// fn main() [io]
+//     println("${rxerr.is_by_design(RxBackreference(3))}")
+// ```
+pub fn is_by_design(e: RxError) -> Bool []
+    todo("regex-core-nv.rxerr.is_by_design")
+
+// What a compile will not grow past.
+//
+// A value the caller owns rather than constants this package chose,
+// because the numbers that suit a jq program compiled once and run over
+// a million documents are not the numbers that suit a pattern typed
+// into a search box by somebody who may be hostile.
+pub struct RxLimits
+    // Bytes of pattern text.  Checked before parsing.
+    max_pattern: Int
+    // Instructions in the compiled program.  What a counted repetition
+    // is expanded against.
+    max_program: Int
+    // The largest `{n,m}` this dialect will expand.
+    max_repeat: Int
+    // Bytes of lazy-DFA cache the matcher may build.  0 turns the DFA
+    // off and leaves the Pike VM, which is what a caller who wants
+    // bounded memory rather than speed asks for.
+    max_dfa_bytes: Int
+
+// A megabyte of pattern, 100000 instructions, a repeat ceiling of 1000
+// and a 2 MiB DFA cache.
+//
+// The `regex` crate's own defaults, rounded: what a long-running
+// service survives with.
+//
+// ```novo
+// use rxerr
+//
+// fn main() [io]
+//     println("${rxerr.default_limits().max_repeat}")
+// ```
+pub fn default_limits() -> RxLimits []
+    todo("regex-core-nv.rxerr.default_limits")
+
+// 4 KiB of pattern, 4000 instructions, a repeat ceiling of 100 and no
+// DFA cache at all.
+//
+// What a caller compiling a pattern that arrived from outside asks for.
+// Named here rather than left to each of them to invent, because the
+// number that matters is the one that bounds an attacker's leverage,
+// and every caller inventing it separately gets a different answer.
+//
+// ```novo
+// use rxerr
+//
+// fn main() [io]
+//     println("${rxerr.untrusted_limits().max_dfa_bytes}")
+// ```
+pub fn untrusted_limits() -> RxLimits []
+    todo("regex-core-nv.rxerr.untrusted_limits")

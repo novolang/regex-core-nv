@@ -1,0 +1,348 @@
+// rxprog.nv — the tree, compiled to instructions, and the two engines
+// that run them.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// TWO ENGINES, ONE PROGRAM, AND THE CHOICE IS PUBLISHED.  RE2 and the
+// `regex` crate both hold the same pair and for the same reason.  The
+// PIKE VM walks every alternative at once, carries a capture slot array
+// per thread, and answers positions AND groups in time bounded by
+// `len(program) x len(subject)`; it is the only one that can answer a
+// capture at all.  The LAZY DFA builds states as it meets them, carries
+// no slots, and answers only WHERE a match ends — and it does so about
+// an order of magnitude faster, because its inner loop is a table
+// lookup per byte.  So the matcher runs the DFA to find that there is a
+// match and where it ends, and the Pike VM over that span to find the
+// groups; a caller that asked only `is_match` never runs the VM at all.
+//
+// THE CHOICE IS A VALUE AND NOT A HEURISTIC NOBODY CAN SEE.
+// `RxEngine` names which engine a call would use and `engine_for`
+// answers it before the call, because "my regex got slow" is
+// unactionable and "your pattern fell back to the Pike VM because it
+// needs capture groups" is a sentence somebody can act on.
+//
+// LINEAR TIME IS THE GUARANTEE AND IT IS WHY THINGS ARE MISSING.
+// Matching is a Thompson NFA simulation with no backtracking, so
+// `(a+)+b` against twenty-five `a`s is immediate rather than
+// exponential.  Back-references and lookaround are the two constructs
+// that cannot be matched under that bound, and `rxerr` refuses both BY
+// NAME — they are the price, not an oversight.
+//
+// THE PROGRAM IS DATA A CALLER MAY HOLD AND REUSE.  Compiling is the
+// expensive half and matching is the cheap one, so `RxProgram` is a
+// value: a jq program compiles its six patterns once and matches them
+// over a million documents, and a package that recompiled per call
+// would make that the dominant cost.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+use rxast
+use rxclass
+use rxerr
+
+// One instruction of the compiled program.
+//
+// Thompson's four plus two: match a class, split, jump, save a capture
+// slot, assert, and accept.  A literal is a one-codepoint class rather
+// than its own instruction, because a separate one would double every
+// case analysis in both engines to save one comparison.
+pub enum RxInsn
+    // Consume one codepoint if it is in the class at `class_index`,
+    // then fall through.
+    RxInsnClass(class_index: Int)
+    // Try `first`, and `second` if that fails.  The ORDER is
+    // leftmost-first: `first` is the preferred branch, which is what
+    // makes `a|ab` answer `a` and `ab|a` answer `ab`.
+    RxInsnSplit(first: Int, second: Int)
+    // Continue at `to`.
+    RxInsnJump(to: Int)
+    // Record the current position in capture slot `slot`.  Slot `2n` is
+    // group `n`'s start and `2n+1` its end, which is the flat encoding
+    // every Pike VM uses and the reason `RxCaptures` is a flat list.
+    RxInsnSave(slot: Int)
+    // Succeed here if the assertion holds, and die otherwise.
+    RxInsnAssert(what: RxAssertion)
+    // The whole pattern matched.
+    RxInsnMatch
+
+// A compiled pattern.
+//
+// `classes` is a side table and the instructions index into it, so a
+// class used in three places costs one copy — which matters, because a
+// negated Unicode class is hundreds of ranges and `[^a]{3}` would
+// otherwise hold three of them.
+pub struct RxProgram
+    insns: [RxInsn]
+    classes: [RxClass]
+    // Capture slots, which is `2 * (group_count + 1)`.
+    slots: Int
+    group_count: Int
+    group_names: [Str]
+    flags: RxFlags
+    // The pattern this was compiled from, kept for a message and for
+    // `to_pattern` round trips.
+    pattern: Str
+
+// Which engine answers a question about a subject.
+pub enum RxEngine
+    // The Pike VM: every alternative at once, with capture slots.
+    // Linear, and the only engine that can answer a group.
+    RxPikeVm
+    // The lazy DFA: a table lookup per byte, states built as they are
+    // met, no captures.  Answers where a match ends and nothing about
+    // its inside.
+    RxLazyDfa
+    // Neither: the pattern is a plain literal run, so a substring
+    // search answers it.  Named rather than hidden because it is the
+    // case a consumer most wants to know it hit — `regex.find("foo",
+    // haystack)` should not be building a DFA.
+    RxLiteralScan
+    // Neither: the pattern can never match, so the answer is known
+    // without looking at the subject.  `[^\x00-\x{10FFFF}]` is one.
+    RxNeverMatches
+
+// The tree, compiled, or the fault the limits refuse.
+//
+// ```novo
+// use rxast
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxast.parse(udata.data_compact(), "[0-9]+",
+//                       rxclass.default_flags(), rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(a) =>
+//             match rxprog.compile(a, rxerr.default_limits())
+//                 Ok(p)   => println("${rxprog.insn_count(p)}")
+//                 Err(er) => println(er.message())
+// ```
+pub fn compile(a: RxAst, limits: RxLimits) -> Result<RxProgram, RxError> []
+    todo("regex-core-nv.rxprog.compile")
+
+// Parse and compile in one call, which is what every consumer wants.
+//
+// The two steps are separate functions because `rxprofile` and a linter
+// need the tree without the program; this is the shorthand for
+// everybody else.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "[0-9]{4}",
+//                        rxclass.default_flags(), rxerr.default_limits())
+//         Ok(p)  => println("${rxprog.insn_count(p)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn build(d: UniData, pattern: Str, flags: RxFlags,
+             limits: RxLimits) -> Result<RxProgram, RxError> []
+    todo("regex-core-nv.rxprog.build")
+
+// How many instructions the program holds.
+//
+// The number `RxLimits.max_program` bounds, and the one a caller
+// budgeting for an untrusted pattern reads back.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "a", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println("${rxprog.insn_count(p)}")
+// ```
+pub fn insn_count(p: RxProgram) -> Int []
+    todo("regex-core-nv.rxprog.insn_count")
+
+// Which engine this program and this question would use.
+//
+// `wants_captures` is the deciding input: the lazy DFA carries no
+// capture slots, so a caller that asks for groups gets the Pike VM
+// however simple the pattern is.  Published because "my regex got
+// slow" is unactionable and "asking for groups turned the DFA off" is
+// a sentence somebody can act on.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "needle", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p) =>
+//             match rxprog.engine_for(p, false)
+//                 RxLiteralScan => println("a substring search")
+//                 _             => println("an engine")
+// ```
+pub fn engine_for(p: RxProgram, wants_captures: Bool) -> RxEngine []
+    todo("regex-core-nv.rxprog.engine_for")
+
+// The engine's own name, for a log or an explanation.
+//
+// ```novo
+// use rxprog
+//
+// fn main() [io]
+//     println(rxprog.engine_name(RxPikeVm))
+// ```
+pub fn engine_name(e: RxEngine) -> Str []
+    todo("regex-core-nv.rxprog.engine_name")
+
+// The longest literal every match must begin with, or `""`.
+//
+// The prefilter, and the reason a search for `"ERROR: [0-9]+"` over a
+// gigabyte of log does not touch the engine for most of it: a substring
+// search finds the candidate positions and the engine runs only there.
+// Published because a consumer with its own index — a database, a log
+// store — can use the same prefix to skip whole blocks before this
+// package sees a byte.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "ERROR: [0-9]+",
+//                        rxclass.default_flags(), rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println(rxprog.literal_prefix(p))
+// ```
+pub fn literal_prefix(p: RxProgram) -> Str []
+    todo("regex-core-nv.rxprog.literal_prefix")
+
+// Is every match of this program anchored at the start of the subject?
+//
+// What lets the matcher skip the try-every-position loop, which is the
+// difference between linear and quadratic on a long subject with no
+// match in it.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "^a", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println("${rxprog.is_anchored(p)}")
+// ```
+pub fn is_anchored(p: RxProgram) -> Bool []
+    todo("regex-core-nv.rxprog.is_anchored")
+
+// The shortest subject this program could match, in codepoints.
+//
+// 0 when the pattern can match nothing at all.  What a caller skipping
+// short inputs reads, and what the compiler uses to prune an
+// alternative that cannot fit the remaining subject.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "[0-9]{4}", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println("${rxprog.min_length(p)}")
+// ```
+pub fn min_length(p: RxProgram) -> Int []
+    todo("regex-core-nv.rxprog.min_length")
+
+// How many capturing groups, not counting the whole match.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "(a)(b)", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println("${rxprog.group_count(p)}")
+// ```
+pub fn group_count(p: RxProgram) -> Int []
+    todo("regex-core-nv.rxprog.group_count")
+
+// The group names, in group order, `""` for a numbered group.
+//
+// ```novo
+// use std.list
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "(?<y>a)", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println("${list.len(rxprog.group_names(p))}")
+// ```
+pub fn group_names(p: RxProgram) -> [Str] []
+    todo("regex-core-nv.rxprog.group_names")
+
+// Does running this program consult unicode-nv's tables?
+//
+// False when every class is ASCII, which is the question a caller in a
+// memory-bounded build asks: the tables are the largest thing this
+// package's closure can pull in, and a pattern over `[0-9A-Za-z_-]`
+// does not need them.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "[0-9]+", rxclass.ascii_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println("${rxprog.needs_tables(p)}")
+// ```
+pub fn needs_tables(p: RxProgram) -> Bool []
+    todo("regex-core-nv.rxprog.needs_tables")
+
+// The program printed back as instructions, one per line.
+//
+// The thing every regular-expression implementation has and most do not
+// publish.  It is here because a `todo()`-shaped package will be
+// implemented by somebody reading RE2's output beside this one, and
+// because a consumer reporting a program-size refusal can show what it
+// was.
+//
+// ```novo
+// use rxclass
+// use rxerr
+// use rxprog
+// use udata
+//
+// fn main() [io]
+//     match rxprog.build(udata.data_compact(), "a", rxclass.default_flags(),
+//                        rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(p)  => println(rxprog.disassemble(p))
+// ```
+pub fn disassemble(p: RxProgram) -> Str []
+    todo("regex-core-nv.rxprog.disassemble")

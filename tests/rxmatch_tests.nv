@@ -1,0 +1,332 @@
+// rxmatch_tests.nv — positions, groups that did not participate, the
+// empty match that would not terminate, and the template.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: regex-core-nv.<module>.<fn>`.
+// That is the expected result until the bodies land.
+//
+// THE VECTORS ARE THE ONES THE CONSUMERS ASKED FOR.  jsonquery-nv names
+// six jq builtins that need positions and groups; each case below is
+// the fact one of them rests on, written as the smallest pattern that
+// shows it.
+
+use std.test
+use std.list
+use rxclass
+use rxerr
+use rxmatch
+use udata
+
+fn tables() -> UniData
+    udata.data_compact()
+
+@test
+fn test_a_match_is_a_position_and_that_is_the_whole_point() [io]
+    // `std.regex.find` answers the matched TEXT and `jpregex` answers a
+    // `Bool`; between them a caller learns that something matched and
+    // what it was, and never where.  jq's `match` reports an offset and
+    // a length, and no amount of copied substring reconstructs it.
+    match rxmatch.compile(tables(), "[0-9]+")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("the span says where, not just what")
+            match rxmatch.find(r, "abc123def")
+                None    => test.assert(false)
+                Some(m) =>
+                    test.assert(m.start == 3)
+                    test.assert(m.end == 6)
+
+            test.case("and the text is one slice away when a caller wants it")
+            match rxmatch.find(r, "abc123def")
+                None    => test.assert(false)
+                Some(m) => test.assert(rxmatch.text_of("abc123def", m) == "123")
+
+            test.case("a subject with no match answers None")
+            match rxmatch.find(r, "abcdef")
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+@test
+fn test_a_group_that_did_not_participate_is_absent_and_not_empty() [io]
+    // `(a)|b` against "b" leaves group 1 ABSENT, which is a different
+    // fact from group 1 matching the empty string — jq's `capture`
+    // reports `null` for one and `""` for the other, and a package that
+    // conflated them would make the two indistinguishable downstream.
+    match rxmatch.compile(tables(), "(a)|(b)")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            match rxmatch.captures(r, "b")
+                None    => test.assert(false)
+                Some(c) =>
+                    test.case("group 1 did not take part")
+                    match rxmatch.group_span(c, 1)
+                        Some(_) => test.assert(false)
+                        None    => test.assert(true)
+
+                    test.case("group 2 did")
+                    match rxmatch.group_span(c, 2)
+                        None    => test.assert(false)
+                        Some(m) => test.assert(m.start == 0)
+
+                    test.case("and group 0 is the whole match")
+                    match rxmatch.group_span(c, 0)
+                        None    => test.assert(false)
+                        Some(m) => test.assert(m.end == 1)
+
+@test
+fn test_a_named_group_is_numbered_as_well() [io]
+    // A template may write `$1` or `${name}` for the same group, and a
+    // package that gave a named group no number would make the two
+    // spellings mean different things.
+    match rxmatch.compile(tables(), "(?<year>[0-9]{4})-(?<month>[0-9]{2})")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("two groups")
+            test.assert(rxmatch.group_count(r) == 2)
+
+            match rxmatch.captures(r, "2026-09")
+                None    => test.assert(false)
+                Some(c) =>
+                    test.case("the name and the number find the same span")
+                    match rxmatch.group_named(r, c, "year")
+                        None         => test.assert(false)
+                        Some(byname) =>
+                            match rxmatch.group_span(c, 1)
+                                None        => test.assert(false)
+                                Some(bynum) => test.assert(byname.start == bynum.start)
+
+                    test.case("and a name nobody declared is absent, not an error")
+                    match rxmatch.group_named(r, c, "day")
+                        Some(_) => test.assert(false)
+                        None    => test.assert(true)
+
+@test
+fn test_an_empty_match_advances_by_one_and_does_not_loop() [io]
+    // The rule every engine has and none states: `a*` against "bb"
+    // matches at 0, 1 and 2, and an implementation that advanced by the
+    // match LENGTH would not terminate.  jq's `scan` and `splits` both
+    // walk matches, so this is the case that hangs a consumer rather
+    // than merely answering wrongly.
+    match rxmatch.compile(tables(), "a*")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("three empty matches over two characters")
+            test.assert(list.len(rxmatch.find_all(r, "bb")) == 3)
+
+            test.case("and each of them is empty")
+            match list.first(rxmatch.find_all(r, "bb"))
+                None    => test.assert(false)
+                Some(m) => test.assert(m.start == m.end)
+
+@test
+fn test_find_at_evaluates_anchors_against_the_whole_subject() [io]
+    // What a caller slicing the subject and re-matching gets wrong: `\b`
+    // and `^` are about the position in the SUBJECT, so a tail that
+    // begins mid-word must not look like the start of one.
+    match rxmatch.compile(tables(), "\\bcd")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("there is no word boundary in the middle of abcd")
+            match rxmatch.find_at(r, "abcd", 2)
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+    match rxmatch.compile(tables(), "\\bcd")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("but there is one after a space")
+            match rxmatch.find_at(r, "ab cd", 2)
+                None    => test.assert(false)
+                Some(m) => test.assert(m.start == 3)
+
+@test
+fn test_alternation_is_leftmost_first_and_the_order_is_meaningful() [io]
+    // RE2, Perl, Python, Go and `std.regex` all make this choice; POSIX
+    // ERE is leftmost-LONGEST and would answer "ab" to both.  A port
+    // that drifted here would answer differently from every other
+    // engine a jq program has been run against.
+    match rxmatch.compile(tables(), "a|ab")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("the first alternative wins")
+            match rxmatch.find(r, "ab")
+                None    => test.assert(false)
+                Some(m) => test.assert(m.end == 1)
+
+    match rxmatch.compile(tables(), "ab|a")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("so writing them the other way round changes the answer")
+            match rxmatch.find(r, "ab")
+                None    => test.assert(false)
+                Some(m) => test.assert(m.end == 2)
+
+@test
+fn test_the_template_resolves_both_spellings_and_doubles_the_dollar() [io]
+    // `$1` and `${name}` are the same group, `$$` is a literal `$`, and
+    // a `$` before anything else is a literal `$` — which is the lenient
+    // reading every deployed engine has and the one that keeps a price
+    // of "$5.00" from becoming a capture reference.
+    match rxmatch.compile(tables(), "(?<n>[0-9]+)")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("the numbered spelling")
+            match rxmatch.replace_all(r, "a1", "<$1>")
+                Err(_) => test.assert(false)
+                Ok(s)  => test.assert(s == "a<1>")
+
+            test.case("and the named one, for the same group")
+            match rxmatch.replace_all(r, "a1", "<\${n}>")
+                Err(_) => test.assert(false)
+                Ok(s)  => test.assert(s == "a<1>")
+
+            test.case("a doubled dollar is one dollar")
+            match rxmatch.replace_all(r, "a1", "$$")
+                Err(_) => test.assert(false)
+                Ok(s)  => test.assert(s == "a$")
+
+            test.case("and only the first match for replace_first")
+            match rxmatch.replace_first(r, "a1b2", "<$1>")
+                Err(_) => test.assert(false)
+                Ok(s)  => test.assert(s == "a<1>b2")
+
+@test
+fn test_a_template_naming_a_group_that_does_not_exist_is_caught_at_setup() [io]
+    // Asked ONCE rather than per match, because a `gsub` over a million
+    // documents should not discover on the last one that `${yer}` was a
+    // typo — and because a replace that silently wrote an empty string
+    // for an unknown name is how a field disappears from a data set.
+    match rxmatch.compile(tables(), "(?<year>[0-9]+)")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("a good template has no fault")
+            match rxmatch.template_fault(r, "\${year}")
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+            test.case("and a typo is named")
+            match rxmatch.template_fault(r, "\${yer}")
+                None      => test.assert(false)
+                Some(bad) => test.assert(bad != "")
+
+@test
+fn test_split_answers_spans_and_keeps_the_trailing_field() [io]
+    // Spans so a caller splitting a megabyte allocates nothing until it
+    // takes the pieces it wants; the trailing empty field so a
+    // migration from `std.regex.split` does not change field counts.
+    match rxmatch.compile(tables(), ",")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("three fields")
+            test.assert(list.len(rxmatch.split(r, "a,b,c")) == 3)
+
+            test.case("a subject ending in a separator yields a trailing empty field")
+            test.assert(list.len(rxmatch.split(r, "a,b,")) == 3)
+
+            test.case("and a limit stops early, with the rest as the last field")
+            test.assert(list.len(rxmatch.split_n(r, "a,b,c", 2)) == 2)
+
+@test
+fn test_the_bounded_calls_are_what_an_untrusted_subject_gets() [io]
+    // A `find_all` over a hostile subject with a pattern that matches
+    // everywhere answers a list the length of the subject, and a caller
+    // that took it has been made to allocate by its input.
+    match rxmatch.compile(tables(), "[0-9]")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("three, not six")
+            test.assert(list.len(rxmatch.find_first_n(r, "123456", 3)) == 3)
+
+    test.case("and the untrusted limits turn the DFA cache off entirely")
+    test.assert(rxerr.untrusted_limits().max_dfa_bytes == 0)
+
+@test
+fn test_a_full_match_is_a_property_of_the_call_and_not_of_the_pattern() [io]
+    // Not `^…$` wrapped around the pattern, which is what a caller
+    // writes and which is wrong under `m` and wrong around an
+    // alternation: `^a|b$` anchors only its own alternative.
+    match rxmatch.compile(tables(), "a|b")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("a matches somewhere in ab")
+            test.assert(rxmatch.is_match(r, "ab"))
+
+            test.case("and does not match the whole of it")
+            test.assert(not rxmatch.is_full_match(r, "ab"))
+
+            test.case("but does match the whole of a")
+            test.assert(rxmatch.is_full_match(r, "a"))
+
+@test
+fn test_captures_all_is_the_one_shot_std_regex_does_not_have() [io]
+    // `std.regex`'s own page says so: "there is no groups-of-every-match
+    // one-shot, so loop `regex.group` over the spans".  jq's `scan` and
+    // `gsub` are both written in terms of exactly that one-shot.
+    match rxmatch.compile(tables(), "([a-z])([0-9])")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("two matches, each with two groups")
+            test.assert(list.len(rxmatch.captures_all(r, "a1b2")) == 2)
+
+            test.case("and the second one starts where the first ended")
+            match rxmatch.captures_at(r, "a1b2", 2)
+                None    => test.assert(false)
+                Some(c) => test.assert(c.group_count == 2)
+
+    test.case("the pattern is kept, so a report can name it")
+    match rxmatch.compile(tables(), "([a-z])")
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(rxmatch.pattern_of(r) == "([a-z])")
+
+@test
+fn test_replace_into_appends_to_the_callers_buffer() [io]
+    // The form everything else is written over: a `gsub` over a million
+    // documents into one buffer is one allocation, and the `Str`
+    // convenience is written over this rather than the other way round.
+    match rxmatch.compile(tables(), "([0-9])")
+        Err(_) => test.assert(false)
+        Ok(r)  =>
+            test.case("the buffer grows")
+            match rxmatch.replace_into([], r, "a1", "<$1>")
+                Err(_)  => test.assert(false)
+                Ok(out) => test.assert(list.len(out) == 4)
+
+            test.case("and one template against one set of captures is its own call")
+            match rxmatch.captures(r, "a1")
+                None    => test.assert(false)
+                Some(c) =>
+                    match rxmatch.expand_into([], r, c, "a1", "<$1>")
+                        Err(_)  => test.assert(false)
+                        Ok(out) => test.assert(list.len(out) == 3)
+
+@test
+fn test_the_flags_are_the_ones_std_regex_has_no_form_of() [io]
+    // `m` is the one that changes what a pattern MEANS and that
+    // `std.regex` has no syntax for at all — a caller matching a file
+    // line by line cannot express it there.
+    let f = rxclass.default_flags()
+
+    test.case("case-insensitivity is off by default")
+    test.assert(not f.case_insensitive)
+
+    test.case("multiline is off by default")
+    test.assert(not f.multi_line)
+
+    test.case("and Unicode is ON by default, unlike std.regex")
+    match f.unicode
+        RxUnicode => test.assert(true)
+        RxAscii   => test.assert(false)
+
+    test.case("^ anchors only the subject until m is set")
+    match rxmatch.regex(tables(), "^b", rxclass.default_flags(), rxerr.default_limits())
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(not rxmatch.is_match(r, "a\nb"))
+
+    test.case("and every line once it is")
+    match rxmatch.regex(tables(), "^b",
+                        RxFlags { case_insensitive: false, multi_line: true,
+                                  dot_matches_newline: false, swap_greed: false,
+                                  ignore_whitespace: false, unicode: RxUnicode },
+                        rxerr.default_limits())
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(rxmatch.is_match(r, "a\nb"))

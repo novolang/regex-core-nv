@@ -1,0 +1,282 @@
+// rxast.nv — the pattern as a typed tree, so that everything after the
+// parser reads a value rather than a string.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE AST IS PUBLISHED, AND THAT IS THE DECISION.  `std.regex` parses
+// straight into instructions, which is smaller and right for what it
+// is; this package publishes the tree because three of its consumers
+// need to ASK something about a pattern without matching anything.
+// jsonpath-nv asks "is this inside I-Regexp"; a linter asks "does this
+// pattern have a `.*` that should be `[^/]*`"; an editor asks "where
+// does this group start".  None of those questions can be answered
+// from a program, and every one of them would otherwise be a second
+// parser in a consumer.
+//
+// EVERY NODE CARRIES ITS SPAN, for the same reason every fault does: a
+// pattern is one line with no landmarks, and a consumer that can point
+// at the construct it is complaining about says something useful.  The
+// span is byte offsets into the pattern text, half-open.
+//
+// FLAGS ARE RESOLVED ON THE TREE AND NOT AT MATCH TIME.  `(?i)` governs
+// everything after it in its group, and `(?i:…)` governs the group; by
+// the time `rxprog` sees a node its flags are the ones that apply to
+// it, because a compiler that had to carry a flag stack would be a
+// compiler with the stack consulted at every leaf.
+//
+// NOTHING HERE PERFORMS ANYTHING.  Every row in this module is `[]`.
+
+use rxclass
+use rxerr
+
+// Where in the pattern a node came from: byte offsets, half-open.
+pub struct RxSpan
+    start: Int
+    end: Int
+
+// What a repetition allows.
+//
+// `max` of -1 is "no maximum", which is what `*`, `+` and `{n,}` all
+// are.  -1 rather than a large number, so a comparison against it
+// cannot be made to pass by a subject being long enough, and rather
+// than an optional, because this is read in the compiler's innermost
+// loop.
+pub struct RxRepeat
+    min: Int
+    max: Int
+    // Whether the repetition prefers FEWER — `*?`, `+?`, `{n,m}?`.
+    // Lazy, not "non-greedy": laziness changes which match is found
+    // and never whether one is, because the engine is not a
+    // backtracker.
+    lazy: Bool
+
+// What a group does besides grouping.
+pub enum RxGroupKind
+    // `(?:…)` — grouping only, no slot in the captures.
+    RxGroupPlain
+    // `(…)` — numbered from 1, left to right by opening parenthesis.
+    RxGroupCapture(index: Int)
+    // `(?<name>…)` — numbered AS WELL as named.  Both, because a
+    // template may write `$1` or `${name}` for the same group and a
+    // package that gave a named group no number would make the two
+    // spellings mean different things.
+    RxGroupNamed(index: Int, name: Str)
+
+// A position in the subject that matches without consuming anything.
+pub enum RxAssertion
+    // `^` — the start of the subject, or of a line under `m`.
+    RxStartText
+    // `$` — the end of the subject, or of a line under `m`.
+    RxEndText
+    // `\b` — a word boundary, over whichever `\w` the flags chose.
+    RxWordBoundary
+    // `\B` — not a word boundary.
+    RxNotWordBoundary
+    // `\A` — the start of the subject, whatever `m` says.  Named
+    // separately from `RxStartText` because under `m` they differ, and
+    // an engine that treated them as one is an engine that anchors at
+    // every line.
+    RxStartTextOnly
+    // `\z` — the end of the subject, whatever `m` says.
+    RxEndTextOnly
+
+// One node of the pattern.
+//
+// `RxEmpty` is a node rather than an absence because `(|a)` and `a{0}`
+// both produce one, and a tree whose "nothing" was an optional would
+// put a match at every level of the compiler.
+pub enum RxNode
+    // Matches at this position and consumes nothing.
+    RxEmpty(span: RxSpan)
+    // One codepoint.  A literal RUN is not a node: `abc` is three
+    // literals inside a concatenation, and `rxprog.literal_prefix` is
+    // what recovers the run for the prefilter.
+    RxLiteral(span: RxSpan, ch: Int)
+    // A character class — `[a-z]`, `\d`, `.`, `\p{Greek}`.  Already
+    // resolved to ranges and already case-folded if `i` was on, because
+    // `rxclass` does both at compile time.
+    RxClassNode(span: RxSpan, class: RxClass)
+    // A zero-width assertion.
+    RxAssert(span: RxSpan, what: RxAssertion)
+    // One after another.
+    RxConcat(span: RxSpan, parts: [RxNode])
+    // One or the other, LEFTMOST-FIRST in the order written.
+    RxAlternate(span: RxSpan, parts: [RxNode])
+    // A repetition of the node inside it.
+    RxRepeatNode(span: RxSpan, rep: RxRepeat, inner: [RxNode])
+    // A group.  `inner` is a one-element list rather than an `RxNode`
+    // because a recursive enum needs its recursion behind a list, and
+    // the list is exactly one element by construction — `node_child` is
+    // the accessor that says so once instead of at every call site.
+    RxGroup(span: RxSpan, kind: RxGroupKind, inner: [RxNode])
+
+// The parse of a pattern, with what a compiler needs to know about it.
+pub struct RxAst
+    root: [RxNode]
+    // How many capturing groups, not counting group 0.
+    group_count: Int
+    // The names in group order, `""` for a numbered group.  A flat list
+    // rather than a map, because a template resolving `${name}` walks
+    // it once and a map would be a second structure to keep in step
+    // with the numbering.
+    group_names: [Str]
+    // The flags in force at the top level, after any leading `(?i)`.
+    flags: RxFlags
+
+// The pattern, parsed, or the first fault in it.
+//
+// `d` is unicode-nv's table, needed because `\w` and `\p{…}` resolve to
+// ranges DURING the parse rather than at match time.  A caller in
+// `RxAscii` mode may pass `udata.data_compact()` and nothing will read
+// it.
+//
+// ```novo
+// use rxast
+// use rxclass
+// use rxerr
+// use udata
+//
+// fn main() [io]
+//     match rxast.parse(udata.data_compact(), "(?<year>[0-9]{4})-[0-9]{2}",
+//                       rxclass.default_flags(), rxerr.default_limits())
+//         Ok(a)  => println("${a.group_count}")
+//         Err(e) => println(e.message())
+// ```
+pub fn parse(d: UniData, pattern: Str, flags: RxFlags,
+             limits: RxLimits) -> Result<RxAst, RxError> []
+    todo("regex-core-nv.rxast.parse")
+
+// The one child of a group or a repetition.
+//
+// Published because the one-element-list encoding is this package's
+// workaround for a recursive enum and not something a consumer should
+// have to know: `node_child` says "there is exactly one" in one place
+// rather than at every call site that would otherwise index a list.
+//
+// ```novo
+// use rxast
+//
+// fn main() [io]
+//     let n = RxEmpty(RxSpan { start: 0, end: 0 })
+//     match rxast.node_child(RxGroup(RxSpan { start: 0, end: 2 }, RxGroupPlain, [n]))
+//         Some(_) => println("one child")
+//         None    => println("a leaf")
+// ```
+pub fn node_child(n: RxNode) -> ?RxNode []
+    todo("regex-core-nv.rxast.node_child")
+
+// Where in the pattern this node came from.
+//
+// ```novo
+// use rxast
+//
+// fn main() [io]
+//     println("${rxast.span_of(RxLiteral(RxSpan { start: 3, end: 4 }, 97)).start}")
+// ```
+pub fn span_of(n: RxNode) -> RxSpan []
+    todo("regex-core-nv.rxast.span_of")
+
+// The pattern this tree would print back as.
+//
+// A round trip, so a consumer that rewrote a subtree — a linter's fix,
+// a profile's narrowing — can hand the result back as text.  Not
+// necessarily byte-identical to the input: `[a-a]` prints as `a` and
+// `(?i)` is already folded into the classes, so what comes back is the
+// pattern this tree MEANS.
+//
+// ```novo
+// use rxast
+//
+// fn main() [io]
+//     println(rxast.to_pattern(RxLiteral(RxSpan { start: 0, end: 1 }, 97)))
+// ```
+pub fn to_pattern(n: RxNode) -> Str []
+    todo("regex-core-nv.rxast.to_pattern")
+
+// Could this pattern match the empty string?
+//
+// The question every repetition compiler has to answer, because `(a*)*`
+// over an inner node that can match nothing is the loop that never
+// terminates in a naive Thompson construction.  Published because a
+// consumer using this as a splitter needs the same answer: a separator
+// pattern that matches the empty string splits between every character.
+//
+// ```novo
+// use rxast
+//
+// fn main() [io]
+//     println("${rxast.matches_empty(RxEmpty(RxSpan { start: 0, end: 0 }))}")
+// ```
+pub fn matches_empty(n: RxNode) -> Bool []
+    todo("regex-core-nv.rxast.matches_empty")
+
+// Is this pattern anchored at the start of the subject?
+//
+// A `^` or `\A` on every alternative.  What lets the matcher skip the
+// leading-position loop entirely, which is the difference between
+// linear and quadratic on a long subject with no match in it.
+//
+// ```novo
+// use rxast
+//
+// fn main() [io]
+//     println("${rxast.is_anchored_start(RxAssert(RxSpan { start: 0, end: 1 }, RxStartText))}")
+// ```
+pub fn is_anchored_start(n: RxNode) -> Bool []
+    todo("regex-core-nv.rxast.is_anchored_start")
+
+// The number of a named group, or `None`.
+//
+// ```novo
+// use rxast
+// use rxclass
+// use rxerr
+// use udata
+//
+// fn main() [io]
+//     match rxast.parse(udata.data_compact(), "(?<y>[0-9]+)",
+//                       rxclass.default_flags(), rxerr.default_limits())
+//         Err(e) => println(e.message())
+//         Ok(a) =>
+//             match rxast.group_index(a, "y")
+//                 Some(i) => println("${i}")
+//                 None    => println("no such group")
+// ```
+pub fn group_index(a: RxAst, name: Str) -> ?Int []
+    todo("regex-core-nv.rxast.group_index")
+
+// Every construct in this pattern, as the names a profile check and an
+// error message both use — `"alternation"`, `"lookaround"`,
+// `"named group"`, `"anchor"`, `"counted repetition"`.
+//
+// Data rather than a predicate per construct, because `rxprofile` asks
+// "is anything here outside the subset" and a linter asks "does this
+// pattern use X", and both want the same vocabulary.  Deduplicated and
+// sorted, so two patterns using the same constructs answer the same
+// list.
+//
+// ```novo
+// use std.list
+// use rxast
+//
+// fn main() [io]
+//     println("${list.len(rxast.constructs_used(RxEmpty(RxSpan { start: 0, end: 0 })))}")
+// ```
+pub fn constructs_used(n: RxNode) -> [Str] []
+    todo("regex-core-nv.rxast.constructs_used")
+
+// Backslash-escape every metacharacter in this text, so it can be used
+// as a literal inside a pattern.
+//
+// Here rather than in `rxmatch` because it is a fact about the SYNTAX
+// this module defines, and because a consumer building a pattern out of
+// user input needs it before it has anything to match against.
+//
+// ```novo
+// use rxast
+//
+// fn main() [io]
+//     println(rxast.escape("a.b*c"))
+// ```
+pub fn escape(text: Str) -> Str []
+    todo("regex-core-nv.rxast.escape")

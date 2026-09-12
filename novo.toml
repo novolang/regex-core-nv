@@ -1,0 +1,68 @@
+[package]
+name        = "regex-core-nv"
+license     = "Apache-2.0"
+version     = "0.0.1"
+description = "A regular-expression engine with RE2 semantics, answering match POSITIONS and numbered and named capture groups: a parser to a typed AST, a compiler to a Pike VM and lazy DFA pair behind one matcher, linear time guaranteed, find-all, split and replace with $1 and ${name} templates into a caller's buffer, Unicode classes over unicode-nv with an ASCII-only mode, and the RFC 9485 I-Regexp subset as a named profile.  Interface only — every body is a todo()."
+
+# `license` sits immediately after the name, before any value that could
+# contain a square bracket.  The publish reads it with a pattern that
+# stops at the first `[`, so a description naming an effect row hides it
+# and the release records no licence at all — silently.
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and every row is `[]`.  A regular-expression engine is
+# arithmetic over text the caller already holds: nothing is read,
+# nothing is written, and a compiled pattern is a value the caller
+# threads.  The one thing an engine of this shape usually reaches for
+# and this one does not is a mutable cache — the lazy DFA's states —
+# which is why `RxLimits.max_dfa_bytes` is a number the CALLER sets and
+# the implementation lane's problem rather than a `[mutate]` row here.
+#
+# NO DEVICE CLAIM, and the README argues it: compiling a pattern builds
+# an instruction list and a class table, and the classes a device would
+# want most are the Unicode ones, which are unicode-nv's data tables.  A
+# device consumer of regular expressions wants a pattern compiled on a
+# host and shipped as a program, and that is a different row nobody has
+# asked for.
+layer       = "core"
+
+category    = "text"
+
+tags        = ["regex", "regular-expressions", "re2", "pike-vm", "captures", "iregexp", "unicode", "text"]
+repository  = "https://github.com/novolang/regex-core-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Positions and capture groups, in linear time"
+
+[dependencies]
+# The character classes, and nothing else.  `\w`, `\d`, `\s` and `.`
+# each have two meanings — the ASCII one everybody learned and the
+# Unicode one everybody expects — and `\p{Greek}` has only the second.
+# `UniCategory` is unicode-nv's, so the categories this package answers
+# and the categories that package answers are the same set by
+# construction rather than by a table somebody keeps in step.
+#
+# WHAT IT COSTS, said here rather than only in the README: unicode-nv's
+# tables are the largest thing this package's closure pulls in, and a
+# caller matching protocol tokens does not need them.  `UniData` is
+# therefore a PARAMETER on every function that could consult it, and
+# `RxAsciiOnly` is a profile that never does — so a consumer can prove
+# it is not paying, with `rxprog.needs_tables`, before it matches
+# anything.
+unicode-nv = "^0.0.1"
+
+# NOT jsonpath-nv, in the other direction.  Its `jpregex` is the I-Regexp
+# consumer this row was asked for and `RxIRegexp` is the profile it
+# would delegate to; a dependency the other way would be a cycle, and
+# the README says what jsonpath-nv changes instead.

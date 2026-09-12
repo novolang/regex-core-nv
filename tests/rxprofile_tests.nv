@@ -1,0 +1,174 @@
+// rxprofile_tests.nv — the subsets, and the rule that a profile
+// refuses without changing what a pattern means.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: regex-core-nv.<module>.<fn>`.
+//
+// I-REGEXP IS RFC 9485, and the assertions below are its list: no
+// anchors, no back-references, no lookaround, no lazy quantifiers, no
+// named groups, no flags.  jsonpath-nv's `jpregex` publishes the same
+// refusals today from its own parser, and `RxIRegexp` is what it would
+// delegate to.
+
+use std.test
+use std.list
+use rxast
+use rxclass
+use rxerr
+use rxmatch
+use rxprofile
+use udata
+
+fn tables() -> UniData
+    udata.data_compact()
+
+fn parsed(pattern: Str) -> ?RxAst
+    match rxast.parse(tables(), pattern, rxclass.default_flags(), rxerr.default_limits())
+        Ok(a)  => Some(a)
+        Err(_) => None
+
+@test
+fn test_i_regexp_has_no_anchors_and_says_so_by_name() [io]
+    // The refusal that sends a writer looking for a typo if it is a
+    // `Bool` and tells them what to change if it is a name.  RFC 9485
+    // removed anchors because the whole subject is always matched.
+    match parsed("^a")
+        None    => test.assert(false)
+        Some(a) =>
+            test.case("an anchor is outside the profile")
+            match rxprofile.outside(RxIRegexp, a)
+                None       => test.assert(false)
+                Some(what) => test.assert(what == "anchor")
+
+    match parsed("[0-9]+")
+        None    => test.assert(false)
+        Some(a) =>
+            test.case("and an ordinary pattern is inside it")
+            match rxprofile.outside(RxIRegexp, a)
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+    test.case("the whole list comes back for a pattern that breaks three rules")
+    match parsed("^(?<y>a)+?")
+        None    => test.assert(false)
+        Some(a) => test.assert(list.len(rxprofile.outside_all(RxIRegexp, a)) >= 3)
+
+@test
+fn test_the_profile_predicate_is_the_one_jpregex_already_publishes() [io]
+    // `jpregex.is_iregexp` answers exactly this, from its own parser.
+    // Answering it here from the parse the compile would use means a
+    // consumer that asks and then compiles parses once.
+    test.case("a plain class is I-Regexp")
+    test.assert(rxprofile.accepts(tables(), RxIRegexp, "[0-9]+"))
+
+    test.case("a lazy quantifier is not")
+    test.assert(not rxprofile.accepts(tables(), RxIRegexp, "a+?"))
+
+    test.case("a named group is not")
+    test.assert(not rxprofile.accepts(tables(), RxIRegexp, "(?<y>a)"))
+
+    test.case("and an inline flag is not")
+    test.assert(not rxprofile.accepts(tables(), RxIRegexp, "(?i)a"))
+
+@test
+fn test_a_profile_refuses_and_never_changes_what_a_pattern_means() [io]
+    // The rule this module is built on.  A profile that also changed
+    // semantics — so `.` meant one thing here and another there — would
+    // reintroduce exactly the interoperability failure RFC 9485 exists
+    // to prevent, in the package meant to fix it.
+    match rxprofile.compile_in(tables(), RxIRegexp, "[0-9]+", rxerr.default_limits())
+        Err(_)            => test.assert(false)
+        Ok(under_profile) =>
+            match rxmatch.compile(tables(), "[0-9]+")
+                Err(_)   => test.assert(false)
+                Ok(full) =>
+                    test.case("both accept the same subject")
+                    test.assert(rxmatch.is_match(under_profile, "abc123") ==
+                                rxmatch.is_match(full, "abc123"))
+
+                    test.case("and refuse the same one")
+                    test.assert(rxmatch.is_match(under_profile, "abc") ==
+                                rxmatch.is_match(full, "abc"))
+
+@test
+fn test_i_regexp_fixes_every_flag_because_it_has_no_flag_syntax() [io]
+    // A caller that set `i` outside the pattern would be matching a
+    // different language from a conforming peer, which is the failure
+    // the subset exists to rule out.
+    let f = rxprofile.profile_flags(RxIRegexp)
+
+    test.case("case-insensitivity is fixed off")
+    test.assert(not f.case_insensitive)
+
+    test.case("multiline is fixed off")
+    test.assert(not f.multi_line)
+
+    test.case("and greediness is not swapped")
+    test.assert(not f.swap_greed)
+
+@test
+fn test_the_ascii_profile_is_how_a_caller_proves_it_pays_for_no_tables() [io]
+    // The tables are the largest thing the closure pulls in.  A profile
+    // that forbids `\p{…}` and fixes the Unicode mode is a compile-time
+    // proof rather than a convention.
+    match rxprofile.compile_in(tables(), RxAsciiOnly, "[0-9A-Za-z_]+",
+                               rxerr.default_limits())
+        Err(_) => test.assert(false)
+        Ok(r)  => test.assert(not rxprofile.needs_tables_in(r))
+
+    test.case("a property class is outside the ASCII profile")
+    test.assert(not rxprofile.accepts(tables(), RxAsciiOnly, "\\p{Greek}+"))
+
+    test.case("and the profile's mode is ASCII")
+    match rxprofile.profile_flags(RxAsciiOnly).unicode
+        RxAscii   => test.assert(true)
+        RxUnicode => test.assert(false)
+
+    test.case("needs_categories is jpregex's question, answered here")
+    test.assert(rxprofile.needs_categories(tables(), "\\p{L}+"))
+    test.assert(not rxprofile.needs_categories(tables(), "[0-9]+"))
+
+@test
+fn test_the_std_compatible_profile_names_what_a_migration_gains() [io]
+    // The risk this package creates: a program that moves a pattern here
+    // gets a matcher with more in it, and the one difference that
+    // changes an ANSWER rather than adding a feature is the Unicode
+    // mode.  `\w` is `[0-9A-Za-z_]` in std.regex and any Unicode letter
+    // here, so a pattern validating an identifier silently starts
+    // accepting one written in Greek.
+    test.case("a pattern using \\w gains something, and it is reported")
+    test.assert(list.len(rxprofile.gained_from_std(tables(), "\\w+")) > 0)
+
+    test.case("a pattern over an explicit ASCII class gains nothing")
+    test.assert(list.len(rxprofile.gained_from_std(tables(), "[0-9]+")) == 0)
+
+    test.case("a named group is outside what std.regex accepts")
+    test.assert(not rxprofile.accepts(tables(), RxStdCompatible, "(?<y>a)"))
+
+    test.case("and so is an inline flag")
+    test.assert(not rxprofile.accepts(tables(), RxStdCompatible, "(?i)a"))
+
+    test.case("every profile names itself the way its specification does")
+    test.assert(rxprofile.profile_name(RxIRegexp) == "I-Regexp")
+    test.assert(rxprofile.profile_name(RxFull) != "")
+    test.assert(rxprofile.profile_name(RxAsciiOnly) != "")
+    test.assert(rxprofile.profile_name(RxStdCompatible) != "")
+
+@test
+fn test_a_pattern_outside_a_profile_is_refused_with_the_construct_named() [io]
+    // `RxOutsideProfile` carries the construct AND the profile, so the
+    // message a consumer prints needs nothing added to it.
+    test.case("compiling an anchor under I-Regexp fails")
+    match rxprofile.compile_in(tables(), RxIRegexp, "^a", rxerr.default_limits())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(e.message() != "")
+
+    test.case("and the fault is not one of the by-design refusals")
+    match rxprofile.compile_in(tables(), RxIRegexp, "^a", rxerr.default_limits())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(not rxerr.is_by_design(e))
+
+    test.case("a back-reference is refused under every profile, by design")
+    match rxprofile.compile_in(tables(), RxFull, "(a)\\1", rxerr.default_limits())
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(rxerr.is_by_design(e))
