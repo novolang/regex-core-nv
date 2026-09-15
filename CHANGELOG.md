@@ -5,6 +5,10 @@ All notable changes to regex-core-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-12
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -51,3 +55,27 @@ The **interface**: every signature and every effect row, and no bodies.
   against a tail; and `\w` means two different things in the two
   Unicode modes, which is the one difference a migration from
   `std.regex` can lose data to.
+
+### Design notes
+
+What the three consumers change when the bodies land. jsonquery-nv
+lists six jq builtins as absent by name in `jqbuiltin.absent_named`
+(`match`, `capture`, `scan`, `splits`, `sub`, `gsub`, and `test/2`);
+those become present and `absent_named` keeps only the host family, so
+`jqbuiltin.absence_reason`'s rows are the changelog entry. jsonpath-nv's
+`jpregex` becomes `rxprofile.compile_in` with `RxIRegexp` plus
+`rxmatch.is_match`, and its `is_iregexp`, `needs_categories` and
+`unsupported_construct` keep their names over `rxprofile.accepts`,
+`needs_categories` and `outside`. matchers-nv's `matchtext.matches_regex`
+gains the ability to say where a match was.
+
+`std.regex` keeps its global pattern-first surface, its `glob_match`,
+and its total no-`Result` shape, all of which suit a script. The one
+difference that changes an answer rather than adding a feature is the
+Unicode reading of `\w`, `\d` and `\s`, which
+`rxprofile.gained_from_std` reports per pattern.
+
+The lazy DFA's state cache is built inside one call rather than across
+calls, so no public row widens. If that turns out to be impossible, the
+row widens and the README says so rather than the claim quietly
+growing.
