@@ -3,6 +3,6 @@
 [unicode-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "e72dc94d06a8697b2c1451d058f53579777b9c5e5c43559e0b8ec3d1ab50d9b8"
+req = "^0.1.3"
+version = "0.1.3"
+hash = "bb136fc5a87b6306b006781512a2b65ec4b0d8b86d4016ba7d94ee089ea2c120"

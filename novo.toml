@@ -1,7 +1,7 @@
 [package]
 name        = "regex-core-nv"
 license     = "Apache-2.0"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "A regular-expression engine with RE2 semantics, answering match POSITIONS and numbered and named capture groups: a parser to a typed AST, a compiler to a Pike VM and lazy DFA pair behind one matcher, linear time guaranteed, find-all, split and replace with $1 and ${name} templates into a caller's buffer, Unicode classes over unicode-nv with an ASCII-only mode, and the RFC 9485 I-Regexp subset as a named profile.  Interface only — every body is a todo()."
 
 # `license` sits immediately after the name, before any value that could
@@ -60,7 +60,7 @@ novo        = ">= 0.8.9"
 # `RxAsciiOnly` is a profile that never does — so a consumer can prove
 # it is not paying, with `rxprog.needs_tables`, before it matches
 # anything.
-unicode-nv = "^0.0.1"
+unicode-nv = "^0.1.3"
 
 # NOT jsonpath-nv, in the other direction.  Its `jpregex` is the I-Regexp
 # consumer this row was asked for and `RxIRegexp` is the profile it
